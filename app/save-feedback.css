@@ -1,0 +1,33 @@
+.save-button:disabled {
+  cursor: wait;
+  opacity: 0.72;
+}
+
+.save-notice {
+  position: fixed;
+  z-index: 20;
+  right: 24px;
+  bottom: 24px;
+  border: 1px solid #87a58d;
+  border-radius: 4px;
+  background: #eef6eb;
+  box-shadow: 0 4px 14px rgb(48 59 54 / 18%);
+  padding: 11px 14px;
+  color: #294f42;
+  font-size: 13px;
+  font-weight: 600;
+  animation: save-notice-in 0.16s ease-out;
+}
+
+@keyframes save-notice-in {
+  from { opacity: 0; transform: translateY(8px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
+@media (max-width: 680px) {
+  .save-notice {
+    right: 12px;
+    bottom: 12px;
+    left: 12px;
+  }
+}

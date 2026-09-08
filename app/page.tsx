@@ -1,5 +1,6 @@
 "use client";
 
+import "./save-feedback.css";
 import { useEffect, useRef, useState } from "react";
 import { EditorCanvas } from "@/components/editor/EditorCanvas";
 import { ProjectSidebar } from "@/components/editor/ProjectSidebar";
@@ -21,10 +22,13 @@ export default function Home() {
   const [activeView, setActiveView] = useState<"story" | "script">("story");
   const [activeScriptId, setActiveScriptId] = useState<string | null>(null);
   const [savedAt, setSavedAt] = useState("Not saved yet");
+  const [isSaving, setIsSaving] = useState(false);
+  const [saveNotice, setSaveNotice] = useState<string | null>(null);
   const [canUndo, setCanUndo] = useState(false);
   const [canRedo, setCanRedo] = useState(false);
   const [projectPath, setProjectPath] = useState<string | null>(null);
   const loadInputRef = useRef<HTMLInputElement>(null);
+  const saveNoticeTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const projectHistoryRef = useRef<StoryProject[]>([]);
   const redoHistoryRef = useRef<StoryProject[]>([]);
   const [newSectionName, setNewSectionName] = useState("");
@@ -110,23 +114,37 @@ export default function Home() {
     setCanRedo(redoHistoryRef.current.length > 0);
     setSavedAt("Redid last change");
   };
+  const showSaveNotice = (message: string) => {
+    if (saveNoticeTimeoutRef.current) clearTimeout(saveNoticeTimeoutRef.current);
+    setSaveNotice(message);
+    saveNoticeTimeoutRef.current = setTimeout(() => setSaveNotice(null), 3000);
+  };
   const saveProject = async () => {
-    if (window.storyWriter) {
-      const result = await window.storyWriter.saveProject(project, projectPath);
-      if (!result) return;
-      if (result.error) { setSavedAt(result.error); return; }
-      setProjectPath(result.path ?? projectPath);
-      setSavedAt(`Saved ${result.path?.split(/[\\/]/).pop() ?? "project"}`);
-      return;
+    if (isSaving) return;
+    setIsSaving(true);
+    try {
+      if (window.storyWriter) {
+        const result = await window.storyWriter.saveProject(project, projectPath);
+        if (!result) return;
+        if (result.error) { setSavedAt(result.error); return; }
+        const fileName = result.path?.split(/[\\/]/).pop() ?? "project";
+        setProjectPath(result.path ?? projectPath);
+        setSavedAt(`Saved ${fileName}`);
+        showSaveNotice(`Saved ${fileName}`);
+        return;
+      }
+      const file = new Blob([JSON.stringify(project, null, 2)], { type: "application/json" });
+      const url = URL.createObjectURL(file);
+      const link = document.createElement("a");
+      link.href = url;
+      link.download = `${project.title.trim().replace(/[^a-z0-9]+/gi, "-").replace(/(^-|-$)/g, "").toLowerCase() || "story-project"}.storyproj`;
+      link.click();
+      URL.revokeObjectURL(url);
+      setSavedAt("Project saved to Downloads");
+      showSaveNotice("Project saved to Downloads");
+    } finally {
+      setIsSaving(false);
     }
-    const file = new Blob([JSON.stringify(project, null, 2)], { type: "application/json" });
-    const url = URL.createObjectURL(file);
-    const link = document.createElement("a");
-    link.href = url;
-    link.download = `${project.title.trim().replace(/[^a-z0-9]+/gi, "-").replace(/(^-|-$)/g, "").toLowerCase() || "story-project"}.storyproj`;
-    link.click();
-    URL.revokeObjectURL(url);
-    setSavedAt("Project saved to Downloads");
   };
   const restoreProject = (content: string, name: string, path: string | null) => {
     try {
@@ -180,11 +198,15 @@ export default function Home() {
     }
     return { ...current, nodes };
   });
+  useEffect(() => () => {
+    if (saveNoticeTimeoutRef.current) clearTimeout(saveNoticeTimeoutRef.current);
+  }, []);
   useEffect(() => {
     const handleShortcut = (event: KeyboardEvent) => {
       if (!event.ctrlKey && !event.metaKey) return;
       if (event.key.toLowerCase() === "z") { event.preventDefault(); event.shiftKey ? redoProject() : undoProject(); }
       if (event.key.toLowerCase() === "y") { event.preventDefault(); redoProject(); }
+      if (event.key.toLowerCase() === "s") { event.preventDefault(); void saveProject(); }
     };
     window.addEventListener("keydown", handleShortcut);
     return () => window.removeEventListener("keydown", handleShortcut);
@@ -195,8 +217,9 @@ export default function Home() {
       <header className="topbar">
         <div className="brand"><span className="brand-mark">S</span><span>Story Writer</span></div>
         <div className="project-name"><span className="project-dot" />{project.title || "Untitled Story"}</div>
-        <div className="top-actions"><span className={`save-status ${savedAt.startsWith("Could not") ? "error" : ""}`} role="status">{savedAt}</span><button className="undo-button" type="button" onClick={undoProject} disabled={!canUndo} title="Undo (Ctrl+Z)">Undo</button><button className="undo-button" type="button" onClick={redoProject} disabled={!canRedo} title="Redo (Ctrl+Y)">Redo</button><input ref={loadInputRef} className="project-load-input" type="file" accept=".storyproj,application/json" onChange={(event) => loadProject(event.target.files?.[0])} /><button className="load-button" type="button" onClick={() => window.storyWriter ? loadProject() : loadInputRef.current?.click()}>Load project</button><button className={`view-mode-button ${isViewOnly ? "active" : ""}`} type="button" onClick={() => setIsViewOnly((current) => !current)}>{isViewOnly ? "Edit mode" : "View mode"}</button><button className="save-button" type="button" onClick={saveProject}>Save project</button></div>
+        <div className="top-actions"><span className={`save-status ${savedAt.startsWith("Could not") ? "error" : ""}`} role="status">{savedAt}</span><button className="undo-button" type="button" onClick={undoProject} disabled={!canUndo} title="Undo (Ctrl+Z)">Undo</button><button className="undo-button" type="button" onClick={redoProject} disabled={!canRedo} title="Redo (Ctrl+Y)">Redo</button><input ref={loadInputRef} className="project-load-input" type="file" accept=".storyproj,application/json" onChange={(event) => loadProject(event.target.files?.[0])} /><button className="load-button" type="button" onClick={() => window.storyWriter ? loadProject() : loadInputRef.current?.click()}>Load project</button><button className={`view-mode-button ${isViewOnly ? "active" : ""}`} type="button" onClick={() => setIsViewOnly((current) => !current)}>{isViewOnly ? "Edit mode" : "View mode"}</button><button className="save-button" type="button" onClick={saveProject} disabled={isSaving}>{isSaving ? "Saving..." : "Save project"}</button></div>
       </header>
+      {saveNotice && <div className="save-notice" role="status" aria-live="polite">{saveNotice}</div>}
       <div className="workspace">
         <ProjectSidebar activeId={activeId} isCollapsed={isSidebarCollapsed} newSectionName={newSectionName} nodes={project.nodes} onAddSection={addTopLevelSection} onNewSectionNameChange={setNewSectionName} onSelect={(id) => { setActiveId(id); setActiveView("story"); }} onToggle={() => setIsSidebarCollapsed(true)} />
         {isSidebarCollapsed && <button className="show-sidebar-button" type="button" title="Show sidebar" aria-label="Show sidebar" onClick={() => setIsSidebarCollapsed(false)}>›</button>}
