@@ -3,6 +3,7 @@ import type { StoryNode, StoryProject } from "./types";
 const rankOptions = ["D", "C", "B", "A"];
 const text = (id: string, label: string): StoryNode => ({ id, label, type: "text", value: "" });
 const list = (id: string, label: string): StoryNode => ({ id, label, type: "list", items: [] });
+const reference = (id: string, label: string): StoryNode => ({ id, label, type: "reference", references: [] });
 const section = (id: string, label: string, children: StoryNode[] = []): StoryNode => ({ id, label, type: "section", children });
 const rank = (id: string, label: string): StoryNode => ({ id, label, type: "rank", value: "D", options: rankOptions });
 
@@ -59,6 +60,11 @@ export function createChapterTemplate(): StoryNode {
   return section(prefix, "Chapter", [text(`${prefix}-info`, "Information"), { id: `${prefix}-comic-script`, label: "Comic Script", type: "script" }]);
 }
 
+export function createArcTemplate(): StoryNode {
+  const prefix = `arc-${crypto.randomUUID()}`;
+  return section(prefix, "New Arc", [text(`${prefix}-lesson`, "Lesson / Main Message"), text(`${prefix}-chapters`, "Estimated / Completed Chapters"), list(`${prefix}-volumes`, "Volumes Covered"), reference(`${prefix}-focus`, "Character Focus"), text(`${prefix}-summary`, "Summary"), text(`${prefix}-key-info`, "Key Information Covered")]);
+}
+
 export function createVolumeTemplate(): StoryNode {
   const prefix = `volume-${crypto.randomUUID()}`;
   return section(prefix, "Volume", [
@@ -66,6 +72,7 @@ export function createVolumeTemplate(): StoryNode {
     text(`${prefix}-front-cover`, "Front Cover Concept"),
     text(`${prefix}-back-cover`, "Back Cover Concept"),
     text(`${prefix}-synopsis`, "Synopsis"),
+    reference(`${prefix}-arcs`, "Arcs Covered"),
     section(`${prefix}-chapters`, "Chapters", [createChapterTemplate()]),
   ]);
 }
@@ -94,7 +101,7 @@ export const storyWriterStarterProject: StoryProject = {
       section("support-cast", "Support Cast", [section("support-faction", "New Faction", [list("support-members", "Characters")])]),
       section("antagonists", "Antagonists", [section("antagonist-faction", "New Faction", [text("antagonist-dynamic", "Group Dynamic and Perspective"), list("antagonist-members", "Characters")])]),
     ]),
-    section("arcs", "Story / Mini Arcs", [section("arc", "New Arc", [text("arc-lesson", "Lesson / Main Message"), text("arc-chapters", "Estimated / Completed Chapters"), list("arc-volumes", "Volumes Covered"), list("arc-focus", "Character Focus"), text("arc-summary", "Summary"), list("arc-key-info", "Key Information Covered")])]),
-    section("volumes", "Volumes", [section("volume", "Volume", [text("cover-image", "Cover Image"), text("front-cover", "Front Cover Concept"), text("back-cover", "Back Cover Concept"), text("volume-synopsis", "Synopsis"), section("chapters", "Chapters", [section("chapter", "Chapter", [text("chapter-info", "Information"), { id: "comic-script", label: "Comic Script", type: "script" }])])])]),
+    section("arcs", "Story / Mini Arcs", [createArcTemplate()]),
+    section("volumes", "Volumes", [section("volume", "Volume", [text("cover-image", "Cover Image"), text("front-cover", "Front Cover Concept"), text("back-cover", "Back Cover Concept"), text("volume-synopsis", "Synopsis"), reference("volume-arcs", "Arcs Covered"), section("chapters", "Chapters", [section("chapter", "Chapter", [text("chapter-info", "Information"), { id: "comic-script", label: "Comic Script", type: "script" }])])])]),
   ],
 };

@@ -1,15 +1,16 @@
 "use client";
 
-import { useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { EditorCanvas } from "@/components/editor/EditorCanvas";
 import { ProjectSidebar } from "@/components/editor/ProjectSidebar";
 import { AddChildModal } from "@/components/ui/AddChildModal";
 import { ConfirmModal } from "@/components/ui/ConfirmModal";
 import { ScriptStudio } from "@/components/script-editor/ScriptStudio";
-import { createChapterTemplate, createCharacterTemplate, createVolumeTemplate, storyWriterStarterProject } from "@/lib/schema/defaults";
-import { addChild, createNode, removeNode, updateNode } from "@/lib/schema/tree";
+import { createArcTemplate, createChapterTemplate, createCharacterTemplate, createVolumeTemplate, storyWriterStarterProject } from "@/lib/schema/defaults";
+import { addChild, createNode, duplicateNode, moveNode, removeNode, updateNode } from "@/lib/schema/tree";
 import type { NodeType, StoryNode, StoryProject } from "@/lib/schema/types";
 import { createScriptDocument } from "@/lib/script/types";
+import type { ReferenceOption } from "@/components/ui/ReferencePicker";
 
 type PendingDelete = { itemName: string; onConfirm: () => void };
 type PendingChild = { parentId: string; parentName: string };
@@ -21,22 +22,31 @@ export default function Home() {
   const [activeScriptId, setActiveScriptId] = useState<string | null>(null);
   const [savedAt, setSavedAt] = useState("Not saved yet");
   const [canUndo, setCanUndo] = useState(false);
+  const [canRedo, setCanRedo] = useState(false);
+  const [projectPath, setProjectPath] = useState<string | null>(null);
   const loadInputRef = useRef<HTMLInputElement>(null);
   const projectHistoryRef = useRef<StoryProject[]>([]);
+  const redoHistoryRef = useRef<StoryProject[]>([]);
   const [newSectionName, setNewSectionName] = useState("");
   const [isSidebarCollapsed, setIsSidebarCollapsed] = useState(false);
   const [pendingDelete, setPendingDelete] = useState<PendingDelete | null>(null);
   const [pendingChild, setPendingChild] = useState<PendingChild | null>(null);
   const [isViewOnly, setIsViewOnly] = useState(false);
   const activeNode = findNode(project.nodes, activeId) ?? project.nodes[0];
+  const referenceOptions = getReferenceOptions(project.nodes);
+  const linkedVolumeIds = getLinkedVolumeIds(project.nodes, referenceOptions.volumes);
 
   const updateProject = (recipe: (current: StoryProject) => StoryProject) => {
     setProject((current) => {
       const next = recipe(current);
-      if (next !== current) projectHistoryRef.current = [...projectHistoryRef.current.slice(-49), current];
+      if (next !== current) {
+        projectHistoryRef.current = [...projectHistoryRef.current.slice(-49), current];
+        redoHistoryRef.current = [];
+      }
       return next;
     });
     setCanUndo(true);
+    setCanRedo(false);
   };
   const changeNode = (id: string, changes: Partial<StoryNode>) => updateProject((current) => ({ ...current, nodes: updateNode(current.nodes, id, changes) }));
   const changeProject = (changes: Partial<StoryProject>) => updateProject((current) => ({ ...current, ...changes }));
@@ -74,6 +84,7 @@ export default function Home() {
   const activeScript = activeScriptId ? findNode(project.nodes, activeScriptId) : undefined;
   const activeParent = findParentNode(project.nodes, activeId);
   const activeChapterNumber = activeParent?.label === "Chapters" ? (activeParent.children?.findIndex((node) => node.id === activeId) ?? -1) + 1 : undefined;
+  const activeVolumeNumber = activeParent?.id === "volumes" ? (activeParent.children?.findIndex((node) => node.id === activeId) ?? -1) + 1 : undefined;
   const closeScript = () => {
     const chapter = activeScriptId ? findParentNode(project.nodes, activeScriptId) : undefined;
     if (chapter) setActiveId(chapter.id);
@@ -82,13 +93,32 @@ export default function Home() {
   const undoProject = () => {
     const previous = projectHistoryRef.current.pop();
     if (!previous) return;
+    redoHistoryRef.current = [...redoHistoryRef.current.slice(-49), project];
     setProject(previous);
     if (!findNode(previous.nodes, activeId)) setActiveId(previous.nodes[0]?.id ?? "");
     if (activeScriptId && !findNode(previous.nodes, activeScriptId)) { setActiveScriptId(null); setActiveView("story"); }
     setCanUndo(projectHistoryRef.current.length > 0);
+    setCanRedo(true);
     setSavedAt("Undid last change");
   };
-  const saveProject = () => {
+  const redoProject = () => {
+    const next = redoHistoryRef.current.pop();
+    if (!next) return;
+    projectHistoryRef.current = [...projectHistoryRef.current.slice(-49), project];
+    setProject(next);
+    setCanUndo(true);
+    setCanRedo(redoHistoryRef.current.length > 0);
+    setSavedAt("Redid last change");
+  };
+  const saveProject = async () => {
+    if (window.storyWriter) {
+      const result = await window.storyWriter.saveProject(project, projectPath);
+      if (!result) return;
+      if (result.error) { setSavedAt(result.error); return; }
+      setProjectPath(result.path ?? projectPath);
+      setSavedAt(`Saved ${result.path?.split(/[\\/]/).pop() ?? "project"}`);
+      return;
+    }
     const file = new Blob([JSON.stringify(project, null, 2)], { type: "application/json" });
     const url = URL.createObjectURL(file);
     const link = document.createElement("a");
@@ -98,43 +128,81 @@ export default function Home() {
     URL.revokeObjectURL(url);
     setSavedAt("Project saved to Downloads");
   };
-  const loadProject = (file?: File) => {
+  const restoreProject = (content: string, name: string, path: string | null) => {
+    try {
+      const loadedProject: unknown = JSON.parse(content);
+      if (!isStoryProject(loadedProject)) throw new Error("Invalid project");
+      setProject(loadedProject);
+      projectHistoryRef.current = [];
+      redoHistoryRef.current = [];
+      setCanUndo(false);
+      setCanRedo(false);
+      setProjectPath(path);
+      setActiveId(loadedProject.nodes[0]?.id ?? "");
+      setActiveScriptId(null);
+      setActiveView("story");
+      setSavedAt(`Loaded ${name}`);
+    } catch {
+      setSavedAt("Could not load that project file");
+    }
+  };
+  const loadProject = async (file?: File) => {
+    if (window.storyWriter) {
+      const result = await window.storyWriter.openProject();
+      if (!result) return;
+      if (result.error || !result.content || !result.path) { setSavedAt(result.error ?? "Could not load that project file"); return; }
+      restoreProject(result.content, result.path.split(/[\\/]/).pop() ?? "project", result.path);
+      return;
+    }
     if (!file) return;
     const reader = new FileReader();
     reader.onload = () => {
-      try {
-        const loadedProject: unknown = JSON.parse(String(reader.result));
-        if (!isStoryProject(loadedProject)) throw new Error("Invalid project");
-        setProject(loadedProject);
-        projectHistoryRef.current = [];
-        setCanUndo(false);
-        setActiveId(loadedProject.nodes[0]?.id ?? "");
-        setActiveScriptId(null);
-        setActiveView("story");
-        setSavedAt(`Loaded ${file.name}`);
-      } catch {
-        setSavedAt("Could not load that project file");
-      } finally {
-        if (loadInputRef.current) loadInputRef.current.value = "";
-      }
+      restoreProject(String(reader.result), file.name, null);
+      if (loadInputRef.current) loadInputRef.current.value = "";
     };
     reader.onerror = () => setSavedAt("Could not read that project file");
     reader.readAsText(file);
   };
+  const duplicate = (id: string) => updateProject((current) => ({ ...current, nodes: duplicateNode(current.nodes, id) }));
+  const move = (id: string, direction: -1 | 1) => updateProject((current) => ({ ...current, nodes: moveNode(current.nodes, id, direction) }));
+  const changeArcVolumes = (fieldId: string, volumeIds: string[]) => updateProject((current) => {
+    const arc = findParentNode(current.nodes, fieldId);
+    const volumes = findNode(current.nodes, "volumes")?.children ?? [];
+    if (!arc) return current;
+    const selectedVolumeIds = new Set(volumeIds);
+    let nodes = current.nodes;
+    for (const volume of volumes) {
+      const coveredArcs = volume.children?.find((child) => child.label === "Arcs Covered");
+      if (!coveredArcs) continue;
+      const references = coveredArcs.references ?? [];
+      const nextReferences = selectedVolumeIds.has(volume.id) ? [...new Set([...references, arc.id])] : references.filter((id) => id !== arc.id);
+      nodes = updateNode(nodes, coveredArcs.id, { references: nextReferences });
+    }
+    return { ...current, nodes };
+  });
+  useEffect(() => {
+    const handleShortcut = (event: KeyboardEvent) => {
+      if (!event.ctrlKey && !event.metaKey) return;
+      if (event.key.toLowerCase() === "z") { event.preventDefault(); event.shiftKey ? redoProject() : undoProject(); }
+      if (event.key.toLowerCase() === "y") { event.preventDefault(); redoProject(); }
+    };
+    window.addEventListener("keydown", handleShortcut);
+    return () => window.removeEventListener("keydown", handleShortcut);
+  });
 
   return (
     <main className={`app-shell ${isSidebarCollapsed ? "sidebar-is-collapsed" : ""}`}>
       <header className="topbar">
         <div className="brand"><span className="brand-mark">S</span><span>Story Writer</span></div>
         <div className="project-name"><span className="project-dot" />{project.title || "Untitled Story"}</div>
-        <div className="top-actions"><span className={`save-status ${savedAt.startsWith("Could not") ? "error" : ""}`} role="status">{savedAt}</span><button className="undo-button" type="button" onClick={undoProject} disabled={!canUndo} title="Undo last project change">Undo</button><input ref={loadInputRef} className="project-load-input" type="file" accept=".storyproj,application/json" onChange={(event) => loadProject(event.target.files?.[0])} /><button className="load-button" type="button" onClick={() => loadInputRef.current?.click()}>Load project</button><button className={`view-mode-button ${isViewOnly ? "active" : ""}`} type="button" onClick={() => setIsViewOnly((current) => !current)}>{isViewOnly ? "Edit mode" : "View mode"}</button><button className="save-button" type="button" onClick={saveProject}>Save project</button></div>
+        <div className="top-actions"><span className={`save-status ${savedAt.startsWith("Could not") ? "error" : ""}`} role="status">{savedAt}</span><button className="undo-button" type="button" onClick={undoProject} disabled={!canUndo} title="Undo (Ctrl+Z)">Undo</button><button className="undo-button" type="button" onClick={redoProject} disabled={!canRedo} title="Redo (Ctrl+Y)">Redo</button><input ref={loadInputRef} className="project-load-input" type="file" accept=".storyproj,application/json" onChange={(event) => loadProject(event.target.files?.[0])} /><button className="load-button" type="button" onClick={() => window.storyWriter ? loadProject() : loadInputRef.current?.click()}>Load project</button><button className={`view-mode-button ${isViewOnly ? "active" : ""}`} type="button" onClick={() => setIsViewOnly((current) => !current)}>{isViewOnly ? "Edit mode" : "View mode"}</button><button className="save-button" type="button" onClick={saveProject}>Save project</button></div>
       </header>
       <div className="workspace">
         <ProjectSidebar activeId={activeId} isCollapsed={isSidebarCollapsed} newSectionName={newSectionName} nodes={project.nodes} onAddSection={addTopLevelSection} onNewSectionNameChange={setNewSectionName} onSelect={(id) => { setActiveId(id); setActiveView("story"); }} onToggle={() => setIsSidebarCollapsed(true)} />
         {isSidebarCollapsed && <button className="show-sidebar-button" type="button" title="Show sidebar" aria-label="Show sidebar" onClick={() => setIsSidebarCollapsed(false)}>›</button>}
-        {activeView === "script" && activeScript ? <ScriptStudio document={activeScript.script ?? createScriptDocument()} onChange={(script) => changeNode(activeScript.id, { script })} onClose={closeScript} /> : <EditorCanvas activeNode={activeNode} chapterNumber={activeChapterNumber} isViewOnly={isViewOnly} project={project} onOpenScript={openScript} onRequestAddChild={(parentId, parentName) => setPendingChild({ parentId, parentName })} onChangeNode={changeNode} onChangeProject={changeProject} onRemoveNode={deleteNode} onRemoveListItem={deleteListItem} />}
+        {activeView === "script" && activeScript ? <ScriptStudio document={activeScript.script ?? createScriptDocument()} onChange={(script) => changeNode(activeScript.id, { script })} onClose={closeScript} /> : <EditorCanvas activeNode={activeNode} chapterNumber={activeChapterNumber} isViewOnly={isViewOnly} linkedVolumeIds={linkedVolumeIds} project={project} referenceOptions={referenceOptions} volumeNumber={activeVolumeNumber} onChangeArcVolumes={changeArcVolumes} onDuplicateNode={duplicate} onMoveNode={move} onNavigateNode={(id) => { setActiveId(id); setActiveView("story"); }} onOpenScript={openScript} onRequestAddChild={(parentId, parentName) => setPendingChild({ parentId, parentName })} onChangeNode={changeNode} onChangeProject={changeProject} onRemoveNode={deleteNode} onRemoveListItem={deleteListItem} />}
       </div>
-      <AddChildModal canAddChapter={pendingChild?.parentName === "Chapters"} canAddCharacter={pendingChild?.parentId === "main-cast"} canAddVolume={pendingChild?.parentId === "volumes"} isOpen={Boolean(pendingChild)} parentName={pendingChild?.parentName ?? ""} onCancel={() => setPendingChild(null)} onConfirm={(type, label, characterLevel) => { if (pendingChild) updateProject((current) => ({ ...current, nodes: addChild(current.nodes, pendingChild.parentId, type === "character" ? createCharacterTemplate(label, characterLevel ?? 1) : type === "chapter" ? createChapterTemplate() : type === "volume" ? createVolumeTemplate() : createNode(type, label)) })); setPendingChild(null); }} />
+      <AddChildModal canAddArc={pendingChild?.parentId === "arcs"} canAddChapter={pendingChild?.parentName === "Chapters"} canAddCharacter={pendingChild?.parentId === "main-cast"} canAddVolume={pendingChild?.parentId === "volumes"} isOpen={Boolean(pendingChild)} parentName={pendingChild?.parentName ?? ""} onCancel={() => setPendingChild(null)} onConfirm={(type, label, characterLevel) => { if (pendingChild) updateProject((current) => ({ ...current, nodes: addChild(current.nodes, pendingChild.parentId, type === "arc" ? createArcTemplate() : type === "character" ? createCharacterTemplate(label, characterLevel ?? 1) : type === "chapter" ? createChapterTemplate() : type === "volume" ? createVolumeTemplate() : createNode(type, label)) })); setPendingChild(null); }} />
       <ConfirmModal isOpen={Boolean(pendingDelete)} itemName={pendingDelete?.itemName ?? ""} onCancel={() => setPendingDelete(null)} onConfirm={() => { pendingDelete?.onConfirm(); setPendingDelete(null); }} />
     </main>
   );
@@ -160,4 +228,38 @@ function isStoryProject(value: unknown): value is StoryProject {
   if (!value || typeof value !== "object") return false;
   const project = value as Partial<StoryProject>;
   return typeof project.title === "string" && typeof project.author === "string" && typeof project.genre === "string" && typeof project.structure === "string" && Array.isArray(project.nodes);
+}
+
+function getReferenceOptions(nodes: StoryNode[]) {
+  const characters = findNode(nodes, "characters");
+  const arcs = findNode(nodes, "arcs");
+  const volumes = findNode(nodes, "volumes");
+  return {
+    characters: collectNodes(characters?.children ?? [], (node) => Boolean(node.children?.some((child) => child.id.endsWith("-mbti")) && node.children?.some((child) => child.id.endsWith("-enneagram")))).map(toReferenceOption),
+    arcs: (arcs?.children ?? []).map(toReferenceOption),
+    volumes: (volumes?.children ?? []).map((node, index) => ({ id: node.id, label: `Volume ${index + 1}` })),
+  };
+}
+
+function getLinkedVolumeIds(nodes: StoryNode[], volumes: ReferenceOption[]) {
+  const arcs = findNode(nodes, "arcs")?.children ?? [];
+  const arcVolumeFields = new Map(arcs.map((arc) => [arc.id, arc.children?.find((child) => child.label === "Volumes Covered")?.id]).filter((entry): entry is [string, string] => Boolean(entry[1])));
+  const links: Record<string, string[]> = {};
+  for (const volume of volumes) {
+    const volumeNode = findNode(nodes, volume.id);
+    const coveredArcs = volumeNode?.children?.find((child) => child.label === "Arcs Covered")?.references ?? [];
+    for (const arcId of coveredArcs) {
+      const fieldId = arcVolumeFields.get(arcId);
+      if (fieldId) links[fieldId] = [...(links[fieldId] ?? []), volume.id];
+    }
+  }
+  return links;
+}
+
+function collectNodes(nodes: StoryNode[], matches: (node: StoryNode) => boolean): StoryNode[] {
+  return nodes.flatMap((node) => [ ...(matches(node) ? [node] : []), ...collectNodes(node.children ?? [], matches) ]);
+}
+
+function toReferenceOption(node: StoryNode): ReferenceOption {
+  return { id: node.id, label: node.label || "Untitled entry" };
 }

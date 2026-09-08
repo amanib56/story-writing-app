@@ -9,6 +9,7 @@ export type StoryNode = {
   value?: string;
   items?: string[];
   options?: string[];
+  references?: string[];
   children?: StoryNode[];
   script?: ScriptDocument;
 };
