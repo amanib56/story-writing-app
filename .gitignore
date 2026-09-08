@@ -1,5 +1,9 @@
 # See https://help.github.com/articles/ignoring-files/ for more about ignoring files.
 
+ComicWriter_ Functionality and Product Analysis.md
+Story Structure of Zamir Reborn.txt
+zamir-app-project-scope.md
+
 # dependencies
 /node_modules
 /.pnp
@@ -19,6 +23,10 @@
 
 # production
 /build
+
+# desktop packaging
+/dist/
+/release/
 
 # misc
 .DS_Store
