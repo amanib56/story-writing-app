@@ -17,7 +17,7 @@ function characterTraits(prefix: string): StoryNode[] {
     text(`${prefix}-height`, "Height / Head Height"),
     text(`${prefix}-goal`, "Goal"),
     text(`${prefix}-desire`, "Desire"),
-    list(`${prefix}-strengths`, "Strengths"),
+    text(`${prefix}-strengths`, "Strengths"),
     text(`${prefix}-flaw`, "Flaw"),
     text(`${prefix}-fear`, "Fear"),
     text(`${prefix}-bio`, "Bio"),
@@ -36,8 +36,8 @@ function manaOrbGrades(prefix: string): StoryNode {
 
 function signatureAndConjure(prefix: string): StoryNode[] {
   return [
-    section(`${prefix}-abilities`, "Signature Abilities", [section(`${prefix}-ability`, "New Ability", [text(`${prefix}-ability-desc`, "Description"), list(`${prefix}-ability-techniques`, "Techniques"), list(`${prefix}-ability-strengths`, "Strengths"), list(`${prefix}-ability-weaknesses`, "Weaknesses")])]),
-    section(`${prefix}-conjure`, "Conjure", [text(`${prefix}-conjure-category`, "Category"), text(`${prefix}-conjure-desc`, "Description"), list(`${prefix}-conjure-techniques`, "Techniques")]),
+    section(`${prefix}-abilities`, "Signature Abilities", [section(`${prefix}-ability`, "New Ability", [text(`${prefix}-ability-desc`, "Description"), text(`${prefix}-ability-techniques`, "Techniques"), text(`${prefix}-ability-strengths`, "Strengths"), text(`${prefix}-ability-weaknesses`, "Weaknesses")])]),
+    section(`${prefix}-conjure`, "Conjure", [text(`${prefix}-conjure-category`, "Category"), text(`${prefix}-conjure-desc`, "Description"), text(`${prefix}-conjure-techniques`, "Techniques")]),
   ];
 }
 
@@ -83,23 +83,23 @@ export const storyWriterStarterProject: StoryProject = {
   genre: "",
   structure: "",
   nodes: [
-    section("overview", "Story Overview", [text("synopsis", "Synopsis"), text("demographic", "Demographic"), text("comparisons", "Comparisons"), text("main-message", "Main Message"), list("themes", "Themes")]),
+    section("overview", "Story Overview", [text("synopsis", "Synopsis"), text("demographic", "Demographic"), text("comparisons", "Comparisons"), text("main-message", "Main Message"), text("themes", "Themes")]),
     section("worldbuilding", "Worldbuilding / Lore", [
       text("culture", "Culture"),
       text("technology", "Technology"),
-      section("countries", "Countries", [section("country", "New Country", [text("country-identity", "Cultural Identity"), list("common-beliefs", "Common Beliefs"), section("legal-social", "Legal and Social Structure", [list("legal", "Legal"), list("illegal", "Illegal"), list("taboo", "Taboo")]), list("locations", "Locations"), list("societal-dynamics", "Societal Dynamics")])]),
-      section("origins", "Origins", [text("origins-notes", "Origins"), section("misc-lore", "Miscellaneous Lore", [list("generations", "Generations / Historical Notes")])]),
+      section("countries", "Countries", [section("country", "New Country", [text("country-identity", "Cultural Identity"), text("common-beliefs", "Common Beliefs"), section("legal-social", "Legal and Social Structure", [text("legal", "Legal"), text("illegal", "Illegal"), text("taboo", "Taboo")]), text("locations", "Locations"), text("societal-dynamics", "Societal Dynamics")])]),
+      section("origins", "Origins", [text("origins-notes", "Origins"), section("misc-lore", "Miscellaneous Lore", [text("generations", "Generations / Historical Notes")])]),
     ]),
     section("magic-system", "Magic System", [
       text("magic-system-name", "System Name"),
       text("magic-description", "Description"),
       section("fundamentals", "Categories of Orb Fundamentals", [section("orb-category", "New Category", [text("category-mbti", "MBTI Alignment"), text("category-training", "Training and Development")])]),
-      section("conjures", "Conjures", [text("conjure-origin", "Origin and Principle"), text("conjure-function", "Function and Limitations"), list("manifestations", "Types of Manifestation")]),
+      section("conjures", "Conjures", [text("conjure-origin", "Origin and Principle"), text("conjure-function", "Function and Limitations"), text("manifestations", "Types of Manifestation")]),
     ]),
     section("characters", "Characters", [
       section("main-cast", "Main Cast", [section("main-character", "New Character", characterFields("main"))]),
-      section("support-cast", "Support Cast", [section("support-faction", "New Faction", [list("support-members", "Characters")])]),
-      section("antagonists", "Antagonists", [section("antagonist-faction", "New Faction", [text("antagonist-dynamic", "Group Dynamic and Perspective"), list("antagonist-members", "Characters")])]),
+      section("support-cast", "Support Cast", [section("support-faction", "New Faction", [text("support-members", "Characters")])]),
+      section("antagonists", "Antagonists", [section("antagonist-faction", "New Faction", [text("antagonist-dynamic", "Group Dynamic and Perspective"), text("antagonist-members", "Characters")])]),
     ]),
     section("arcs", "Story / Mini Arcs", [createArcTemplate()]),
     section("volumes", "Volumes", [section("volume", "Volume", [text("cover-image", "Cover Image"), text("front-cover", "Front Cover Concept"), text("back-cover", "Back Cover Concept"), text("volume-synopsis", "Synopsis"), reference("volume-arcs", "Arcs Covered"), section("chapters", "Chapters", [section("chapter", "Chapter", [text("chapter-info", "Information"), { id: "comic-script", label: "Comic Script", type: "script" }])])])]),
