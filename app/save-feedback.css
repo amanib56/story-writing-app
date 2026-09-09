@@ -35,3 +35,24 @@
 .character-fields {
   grid-template-columns: minmax(0, 1fr);
 }
+
+.topbar {
+  position: sticky;
+  z-index: 10;
+  top: 0;
+}
+
+.sidebar {
+  position: sticky;
+  top: 56px;
+  align-self: start;
+  box-sizing: border-box;
+  height: calc(100vh - 56px);
+  overflow-y: auto;
+}
+
+@media (max-width: 680px) {
+  .sidebar {
+    top: 56px;
+  }
+}
