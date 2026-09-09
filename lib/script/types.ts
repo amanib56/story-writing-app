@@ -4,5 +4,5 @@ export type ScriptDocument = {
 };
 
 export function createScriptDocument(): ScriptDocument {
-  return { source: "Page\nPanel\nEnter Desc...", version: 1 };
+  return { source: "", version: 1 };
 }
