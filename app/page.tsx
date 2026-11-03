@@ -4,6 +4,7 @@ import "./save-feedback.css";
 import { useEffect, useRef, useState } from "react";
 import { EditorCanvas } from "@/components/editor/EditorCanvas";
 import { ProjectSidebar } from "@/components/editor/ProjectSidebar";
+import { ProjectStartScreen } from "@/components/editor/ProjectStartScreen";
 import { AddChildModal } from "@/components/ui/AddChildModal";
 import { ConfirmModal } from "@/components/ui/ConfirmModal";
 import { ScriptStudio } from "@/components/script-editor/ScriptStudio";
@@ -12,12 +13,19 @@ import { addChild, createNode, duplicateNode, moveNode, removeNode, updateNode }
 import type { NodeType, StoryNode, StoryProject } from "@/lib/schema/types";
 import { createScriptDocument } from "@/lib/script/types";
 import type { ReferenceOption } from "@/components/ui/ReferencePicker";
+import { clearBrowserRecentProjects, forgetBrowserProject, listBrowserRecentProjects, rememberBrowserProject } from "@/lib/recentProjects";
+import type { RecentProject } from "@/lib/recentProjects";
 
 type PendingDelete = { itemName: string; onConfirm: () => void };
 type PendingChild = { parentId: string; parentName: string };
 
 export default function Home() {
   const [project, setProject] = useState(storyWriterStarterProject);
+  const [hasActiveProject, setHasActiveProject] = useState(false);
+  const [recentProjects, setRecentProjects] = useState<RecentProject[]>([]);
+  const [isLoadingRecent, setIsLoadingRecent] = useState(true);
+  const [recentProjectId, setRecentProjectId] = useState<string | null>(null);
+  const [isProjectDirty, setIsProjectDirty] = useState(false);
   const [activeId, setActiveId] = useState("overview");
   const [activeView, setActiveView] = useState<"story" | "script">("story");
   const [activeScriptId, setActiveScriptId] = useState<string | null>(null);
@@ -40,12 +48,92 @@ export default function Home() {
   const referenceOptions = getReferenceOptions(project.nodes);
   const linkedVolumeIds = getLinkedVolumeIds(project.nodes, referenceOptions.volumes);
 
+  const refreshRecentProjects = async () => {
+    try {
+      const recent = window.storyWriter
+        ? await window.storyWriter.listRecentProjects()
+        : await listBrowserRecentProjects();
+      setRecentProjects(recent);
+    } catch {
+      setRecentProjects([]);
+    } finally {
+      setIsLoadingRecent(false);
+    }
+  };
+
+  const startNewProject = () => {
+    const newProject = structuredClone(storyWriterStarterProject);
+    const recentId = `browser-${crypto.randomUUID()}`;
+    setProject(newProject);
+    setProjectPath(null);
+    setRecentProjectId(window.storyWriter ? null : recentId);
+    setHasActiveProject(true);
+    setIsProjectDirty(false);
+    setActiveId(newProject.nodes[0]?.id ?? "overview");
+    setActiveScriptId(null);
+    setActiveView("story");
+    setSavedAt("Not saved yet");
+    projectHistoryRef.current = [];
+    redoHistoryRef.current = [];
+    setCanUndo(false);
+    setCanRedo(false);
+    if (!window.storyWriter) {
+      void rememberBrowserProject(recentId, newProject.title, newProject).then(refreshRecentProjects).catch(() => undefined);
+    }
+  };
+
+  const returnToStart = async () => {
+    if (isProjectDirty && !window.confirm("This project has unsaved changes. Return to the start screen anyway?")) return;
+    if (!window.storyWriter && recentProjectId) {
+      try {
+        await rememberBrowserProject(recentProjectId, project.title || "Untitled Story", project);
+      } catch {
+        setSavedAt("Could not update the recent project snapshot");
+      }
+    }
+    setHasActiveProject(false);
+    setActiveScriptId(null);
+    setActiveView("story");
+    await refreshRecentProjects();
+  };
+
+  const openRecentProject = async (recent: RecentProject) => {
+    if (window.storyWriter) {
+      const result = await window.storyWriter.openRecentProject(recent.path ?? recent.id);
+      if (!result?.content || !result.path) {
+        if (result?.error) setSavedAt(result.error);
+        await refreshRecentProjects();
+        return;
+      }
+      restoreProject(result.content, recent.name, result.path);
+      return;
+    }
+    if (recent.content) {
+      restoreProject(recent.content, recent.name, recent.id);
+      return;
+    }
+    setSavedAt("This recent project has no saved browser copy");
+  };
+
+  const removeRecentProject = async (id: string) => {
+    if (window.storyWriter) await window.storyWriter.removeRecentProject(id);
+    else await forgetBrowserProject(id);
+    await refreshRecentProjects();
+  };
+
+  const clearRecentProjectHistory = async () => {
+    if (window.storyWriter) await window.storyWriter.clearRecentProjects();
+    else await clearBrowserRecentProjects();
+    setRecentProjects([]);
+  };
+
   const updateProject = (recipe: (current: StoryProject) => StoryProject) => {
     setProject((current) => {
       const next = recipe(current);
       if (next !== current) {
         projectHistoryRef.current = [...projectHistoryRef.current.slice(-49), current];
         redoHistoryRef.current = [];
+        setIsProjectDirty(true);
       }
       return next;
     });
@@ -99,6 +187,7 @@ export default function Home() {
     if (!previous) return;
     redoHistoryRef.current = [...redoHistoryRef.current.slice(-49), project];
     setProject(previous);
+    setIsProjectDirty(true);
     if (!findNode(previous.nodes, activeId)) setActiveId(previous.nodes[0]?.id ?? "");
     if (activeScriptId && !findNode(previous.nodes, activeScriptId)) { setActiveScriptId(null); setActiveView("story"); }
     setCanUndo(projectHistoryRef.current.length > 0);
@@ -110,6 +199,7 @@ export default function Home() {
     if (!next) return;
     projectHistoryRef.current = [...projectHistoryRef.current.slice(-49), project];
     setProject(next);
+    setIsProjectDirty(true);
     setCanUndo(true);
     setCanRedo(redoHistoryRef.current.length > 0);
     setSavedAt("Redid last change");
@@ -129,8 +219,11 @@ export default function Home() {
         if (result.error) { setSavedAt(result.error); return; }
         const fileName = result.path?.split(/[\\/]/).pop() ?? "project";
         setProjectPath(result.path ?? projectPath);
+        setRecentProjectId(result.path ?? projectPath);
+        setIsProjectDirty(false);
         setSavedAt(`Saved ${fileName}`);
         showSaveNotice(`Saved ${fileName}`);
+        void refreshRecentProjects();
         return;
       }
       const file = new Blob([JSON.stringify(project, null, 2)], { type: "application/json" });
@@ -140,6 +233,7 @@ export default function Home() {
       link.download = `${project.title.trim().replace(/[^a-z0-9]+/gi, "-").replace(/(^-|-$)/g, "").toLowerCase() || "story-project"}.storyproj`;
       link.click();
       URL.revokeObjectURL(url);
+      setIsProjectDirty(false);
       setSavedAt("Project saved to Downloads");
       showSaveNotice("Project saved to Downloads");
     } finally {
@@ -150,16 +244,22 @@ export default function Home() {
     try {
       const loadedProject: unknown = JSON.parse(content);
       if (!isStoryProject(loadedProject)) throw new Error("Invalid project");
+      const recentId = path ?? `browser-${crypto.randomUUID()}`;
       setProject(loadedProject);
       projectHistoryRef.current = [];
       redoHistoryRef.current = [];
       setCanUndo(false);
       setCanRedo(false);
+      setIsProjectDirty(false);
       setProjectPath(path);
+      setRecentProjectId(recentId);
+      setHasActiveProject(true);
       setActiveId(loadedProject.nodes[0]?.id ?? "");
       setActiveScriptId(null);
       setActiveView("story");
       setSavedAt(`Loaded ${name}`);
+      if (path) void refreshRecentProjects();
+      else void rememberBrowserProject(recentId, name, loadedProject).then(refreshRecentProjects).catch(() => undefined);
     } catch {
       setSavedAt("Could not load that project file");
     }
@@ -198,6 +298,30 @@ export default function Home() {
     }
     return { ...current, nodes };
   });
+  useEffect(() => {
+    let isMounted = true;
+    const loadRecentProjects = async () => {
+      try {
+        const recent = window.storyWriter
+          ? await window.storyWriter.listRecentProjects()
+          : await listBrowserRecentProjects();
+        if (isMounted) setRecentProjects(recent);
+      } catch {
+        if (isMounted) setRecentProjects([]);
+      } finally {
+        if (isMounted) setIsLoadingRecent(false);
+      }
+    };
+    void loadRecentProjects();
+    return () => { isMounted = false; };
+  }, []);
+  useEffect(() => {
+    if (!hasActiveProject || window.storyWriter || !recentProjectId) return;
+    const timeout = setTimeout(() => {
+      void rememberBrowserProject(recentProjectId, project.title || "Untitled Story", project).catch(() => undefined);
+    }, 350);
+    return () => clearTimeout(timeout);
+  }, [hasActiveProject, project, recentProjectId]);
   useEffect(() => () => {
     if (saveNoticeTimeoutRef.current) clearTimeout(saveNoticeTimeoutRef.current);
   }, []);
@@ -212,18 +336,44 @@ export default function Home() {
     return () => window.removeEventListener("keydown", handleShortcut);
   });
 
+  if (!hasActiveProject) {
+    return (
+      <>
+        <input
+          ref={loadInputRef}
+          className="project-load-input"
+          type="file"
+          accept=".storyproj,application/json"
+          onChange={(event) => {
+            void loadProject(event.currentTarget.files?.[0]);
+            event.currentTarget.value = "";
+          }}
+        />
+        <ProjectStartScreen
+          recentProjects={recentProjects}
+          isLoadingRecent={isLoadingRecent}
+          onNewProject={startNewProject}
+          onLoadProject={() => window.storyWriter ? void loadProject() : loadInputRef.current?.click()}
+          onOpenRecent={(recent) => { void openRecentProject(recent); }}
+          onRemoveRecent={(id) => { void removeRecentProject(id); }}
+          onClearRecent={() => { void clearRecentProjectHistory(); }}
+        />
+      </>
+    );
+  }
+
   return (
     <main className={`app-shell ${isSidebarCollapsed ? "sidebar-is-collapsed" : ""}`}>
       <header className="topbar">
         <div className="brand"><span className="brand-mark">S</span><span>Story Writer</span></div>
         <div className="project-name"><span className="project-dot" />{project.title || "Untitled Story"}</div>
-        <div className="top-actions"><span className={`save-status ${savedAt.startsWith("Could not") ? "error" : ""}`} role="status">{savedAt}</span><button className="undo-button" type="button" onClick={undoProject} disabled={!canUndo} title="Undo (Ctrl+Z)">Undo</button><button className="undo-button" type="button" onClick={redoProject} disabled={!canRedo} title="Redo (Ctrl+Y)">Redo</button><input ref={loadInputRef} className="project-load-input" type="file" accept=".storyproj,application/json" onChange={(event) => loadProject(event.target.files?.[0])} /><button className="load-button" type="button" onClick={() => window.storyWriter ? loadProject() : loadInputRef.current?.click()}>Load project</button><button className={`view-mode-button ${isViewOnly ? "active" : ""}`} type="button" onClick={() => setIsViewOnly((current) => !current)}>{isViewOnly ? "Edit mode" : "View mode"}</button><button className="save-button" type="button" onClick={saveProject} disabled={isSaving}>{isSaving ? "Saving..." : "Save project"}</button></div>
+        <div className="top-actions"><span className={`save-status ${savedAt.startsWith("Could not") ? "error" : ""}`} role="status">{savedAt}</span><button className="projects-button" type="button" onClick={() => { void returnToStart(); }}>Projects</button><button className="undo-button" type="button" onClick={undoProject} disabled={!canUndo} title="Undo (Ctrl+Z)">Undo</button><button className="undo-button" type="button" onClick={redoProject} disabled={!canRedo} title="Redo (Ctrl+Y)">Redo</button><input ref={loadInputRef} className="project-load-input" type="file" accept=".storyproj,application/json" onChange={(event) => { void loadProject(event.target.files?.[0]); event.currentTarget.value = ""; }} /><button className="load-button" type="button" onClick={() => window.storyWriter ? void loadProject() : loadInputRef.current?.click()}>Load project</button><button className={`view-mode-button ${isViewOnly ? "active" : ""}`} type="button" onClick={() => setIsViewOnly((current) => !current)}>{isViewOnly ? "Edit mode" : "View mode"}</button><button className="save-button" type="button" onClick={() => { void saveProject(); }} disabled={isSaving}>{isSaving ? "Saving..." : "Save project"}</button></div>
       </header>
       {saveNotice && <div className="save-notice" role="status" aria-live="polite">{saveNotice}</div>}
       <div className="workspace">
         <ProjectSidebar activeId={activeId} isCollapsed={isSidebarCollapsed} newSectionName={newSectionName} nodes={project.nodes} onAddSection={addTopLevelSection} onNewSectionNameChange={setNewSectionName} onSelect={(id) => { setActiveId(id); setActiveView("story"); }} onToggle={() => setIsSidebarCollapsed(true)} />
         {isSidebarCollapsed && <button className="show-sidebar-button" type="button" title="Show sidebar" aria-label="Show sidebar" onClick={() => setIsSidebarCollapsed(false)}>›</button>}
-        {activeView === "script" && activeScript ? <ScriptStudio document={activeScript.script ?? createScriptDocument()} onChange={(script) => changeNode(activeScript.id, { script })} onClose={closeScript} /> : <EditorCanvas activeNode={activeNode} chapterNumber={activeChapterNumber} isViewOnly={isViewOnly} linkedVolumeIds={linkedVolumeIds} project={project} referenceOptions={referenceOptions} volumeNumber={activeVolumeNumber} onChangeArcVolumes={changeArcVolumes} onDuplicateNode={duplicate} onMoveNode={move} onNavigateNode={(id) => { setActiveId(id); setActiveView("story"); }} onOpenScript={openScript} onRequestAddChild={(parentId, parentName) => setPendingChild({ parentId, parentName })} onChangeNode={changeNode} onChangeProject={changeProject} onRemoveNode={deleteNode} onRemoveListItem={deleteListItem} />}
+        {activeView === "script" && activeScript ? <ScriptStudio document={activeScript.script ?? createScriptDocument()} title={findParentNode(project.nodes, activeScript.id)?.label ?? activeScript.label} onChange={(script) => changeNode(activeScript.id, { script })} onSave={() => { void saveProject(); }} onClose={closeScript} /> : <EditorCanvas activeNode={activeNode} chapterNumber={activeChapterNumber} isViewOnly={isViewOnly} linkedVolumeIds={linkedVolumeIds} project={project} referenceOptions={referenceOptions} volumeNumber={activeVolumeNumber} onChangeArcVolumes={changeArcVolumes} onDuplicateNode={duplicate} onMoveNode={move} onNavigateNode={(id) => { setActiveId(id); setActiveView("story"); }} onOpenScript={openScript} onRequestAddChild={(parentId, parentName) => setPendingChild({ parentId, parentName })} onChangeNode={changeNode} onChangeProject={changeProject} onRemoveNode={deleteNode} onRemoveListItem={deleteListItem} />}
       </div>
       <AddChildModal canAddArc={pendingChild?.parentId === "arcs"} canAddChapter={pendingChild?.parentName === "Chapters"} canAddCharacter={pendingChild?.parentId === "main-cast"} canAddVolume={pendingChild?.parentId === "volumes"} isOpen={Boolean(pendingChild)} parentName={pendingChild?.parentName ?? ""} onCancel={() => setPendingChild(null)} onConfirm={(type, label, characterLevel) => { if (pendingChild) updateProject((current) => ({ ...current, nodes: addChild(current.nodes, pendingChild.parentId, type === "arc" ? createArcTemplate() : type === "character" ? createCharacterTemplate(label, characterLevel ?? 1) : type === "chapter" ? createChapterTemplate() : type === "volume" ? createVolumeTemplate() : createNode(type, label)) })); setPendingChild(null); }} />
       <ConfirmModal isOpen={Boolean(pendingDelete)} itemName={pendingDelete?.itemName ?? ""} onCancel={() => setPendingDelete(null)} onConfirm={() => { pendingDelete?.onConfirm(); setPendingDelete(null); }} />
