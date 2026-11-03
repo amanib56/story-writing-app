@@ -1,503 +1,581 @@
 "use client";
 
-import { useEffect, useRef, useState } from "react";
-import type { KeyboardEvent as ReactKeyboardEvent } from "react";
+import { useCallback, useMemo, useRef, useState } from "react";
+import CodeMirror, { type ReactCodeMirrorRef } from "@uiw/react-codemirror";
+import {
+  EditorView,
+  Decoration,
+  type DecorationSet,
+  ViewPlugin,
+  type ViewUpdate,
+  type PluginValue,
+  keymap,
+  type KeyBinding,
+  placeholder,
+} from "@codemirror/view";
+import { RangeSetBuilder, type Text } from "@codemirror/state";
+import { autocompletion, type CompletionContext, type CompletionResult } from "@codemirror/autocomplete";
 import type { ScriptDocument } from "@/lib/script/types";
 
 type ScriptStudioProps = {
   document: ScriptDocument;
+  title: string;
   onChange: (document: ScriptDocument) => void;
+  onSave: () => void;
   onClose: () => void;
 };
 
-type LineType = "page" | "panel" | "tag" | "text";
-type Line = { id: string; text: string };
-type Suggestion = {
-  lineId: string;
-  top: number;
-  left: number;
-  rangeStart: number;
-  rangeEnd: number;
-  options: string[];
-};
+// ---------------------------------------------------------------------
+// Grammar for the real ComicWriter shorthand:
+//
+//   Page 1            (or "Page 3-4" for a spread)
+//   Panel 1
+//   <plain description text>
+//   	NAME (MODIFIER): dialogue text
+//   	CAPTION (): caption text
+//   	SFX (): sound effect text
+//   (Page turner)
+// ---------------------------------------------------------------------
 
-let idCounter = 0;
-const newId = () => `line-${++idCounter}-${Date.now().toString(36)}`;
+type LineKind = "page" | "panel" | "pageTurner" | "dialogue" | "caption" | "sfx" | "paragraph" | "blank";
 
-const PAGE_RE = /^page\b/i;
-const PANEL_RE = /^panel\b/i;
-const TAG_RE = /^(character|caption|sfx)\b/i;
-const OPEN_TAG_RE = /^(\s*)CHARACTER\s*\(([^)]*)$/i;
-const TAG_LINE_RE = /^(\s*)(CHARACTER|CAPTION|SFX)\s*\(([^)]*)\)(:?\s*)/i;
+const PAGE_RE = /^page\s+(\d+)(?:\s*-\s*(\d+))?\s*$/i;
+const PANEL_RE = /^panel\s+(\d+)\s*$/i;
+const PAGE_TURNER_RE = /^\(page turner\)\s*$/i;
+const DIALOGUE_RE = /^\t([A-Z][A-Z0-9' ]*)(?:\s*(\([^)]*\)))?:\s*(.*)$/;
 
-const templateText: Record<"3" | "4" | "5", { tag: string; template: string }> = {
-  "3": { tag: "CHARACTER", template: "\tCHARACTER (): content" },
-  "4": { tag: "CAPTION", template: "\tCAPTION (): content" },
-  "5": { tag: "SFX", template: "\tSFX (): content" },
-};
-
-function lineType(text: string): LineType {
+function classifyLine(text: string): LineKind {
   const trimmed = text.trim();
   if (PAGE_RE.test(trimmed)) return "page";
   if (PANEL_RE.test(trimmed)) return "panel";
-  if (TAG_RE.test(trimmed)) return "tag";
-  return "text";
+  if (PAGE_TURNER_RE.test(trimmed)) return "pageTurner";
+  const lettering = text.match(DIALOGUE_RE);
+  if (lettering) {
+    const subject = lettering[1].trim().toUpperCase();
+    if (subject === "CAPTION") return "caption";
+    if (subject === "SFX") return "sfx";
+    return "dialogue";
+  }
+  if (trimmed === "") return "blank";
+  return "paragraph";
 }
 
-function linesFromSource(source: string): Line[] {
-  const raw = source.replace(/\r/g, "").split("\n");
-  return (raw.length ? raw : [""]).map((text) => ({ id: newId(), text }));
+// ---------------------------------------------------------------------
+// Editor decorations: line classes + inline dialogue token spans.
+// ---------------------------------------------------------------------
+
+function buildDecorations(view: EditorView): DecorationSet {
+  const builder = new RangeSetBuilder<Decoration>();
+
+  for (const { from, to } of view.visibleRanges) {
+    let pos = from;
+    while (pos <= to) {
+      const line = view.state.doc.lineAt(pos);
+      const text = line.text;
+      const kind = classifyLine(text);
+
+      if (kind !== "blank") {
+        builder.add(line.from, line.from, Decoration.line({ class: `cm-${kind}` }));
+      }
+
+      if (kind === "dialogue") {
+        const match = text.match(DIALOGUE_RE);
+        if (match) {
+          const [, subject, modifier, content] = match;
+
+          const subjectStart = line.from + text.indexOf(subject);
+          builder.add(
+            subjectStart,
+            subjectStart + subject.length,
+            Decoration.mark({ class: "cm-lettering-subject" })
+          );
+
+          if (modifier) {
+            const inner = modifier.slice(1, -1);
+            const modifierStart = line.from + text.indexOf(inner, subjectStart - line.from);
+            if (inner.length > 0) {
+              builder.add(
+                modifierStart,
+                modifierStart + inner.length,
+                Decoration.mark({ class: "cm-lettering-modifier" })
+              );
+            }
+          }
+
+          if (content && content.length > 0) {
+            const contentStart = line.to - content.length;
+            builder.add(
+              contentStart,
+              contentStart + content.length,
+              Decoration.mark({ class: "cm-lettering-content" })
+            );
+          }
+        }
+      }
+
+      pos = line.to + 1;
+    }
+  }
+
+  return builder.finish();
 }
 
-function sourceFromLines(lines: Line[]): string {
-  return lines.map((line) => line.text).join("\n");
+class ScriptHighlightPlugin implements PluginValue {
+  decorations: DecorationSet;
+  constructor(view: EditorView) {
+    this.decorations = buildDecorations(view);
+  }
+  update(update: ViewUpdate) {
+    if (update.docChanged || update.viewportChanged) {
+      this.decorations = buildDecorations(update.view);
+    }
+  }
 }
 
-function computeBadges(lines: Line[]): Map<string, string> {
-  const badges = new Map<string, string>();
+const scriptHighlightPlugin = ViewPlugin.fromClass(ScriptHighlightPlugin, {
+  decorations: (v) => v.decorations,
+});
+
+// ---------------------------------------------------------------------
+// Outline (page/panel sidebar) — computed from plain source text, same
+// data the parent already holds, so no dependency on live editor state.
+// ---------------------------------------------------------------------
+
+type OutlineEntry = { line: number; label: string; isPage: boolean };
+
+function buildOutline(lines: string[]): OutlineEntry[] {
+  const entries: OutlineEntry[] = [];
   let pageNumber = 0;
-  let panelIndex = 0;
-  lines.forEach((line) => {
-    const type = lineType(line.text);
-    if (type === "page") {
-      const isSpread = /-\s*\d*\s*$/.test(line.text.trim());
-      const start = pageNumber + 1;
-      pageNumber += isSpread ? 2 : 1;
-      panelIndex = 0;
-      badges.set(line.id, isSpread ? `Page ${start}-${start + 1}` : `Page ${start}`);
-    } else if (type === "panel") {
-      panelIndex += 1;
-      badges.set(line.id, `Panel ${panelIndex}`);
-    }
-  });
-  return badges;
-}
-
-function buildOutline(lines: Line[], badges: Map<string, string>) {
-  const entries: { id: string; label: string; isPage: boolean }[] = [];
-  let openPanelId: string | null = null;
+  let openPanelLine: number | null = null;
   let description = "";
-  const flush = () => {
-    if (openPanelId) {
-      entries.push({ id: openPanelId, label: description || "Enter description...", isPage: false });
+
+  const flushPanel = () => {
+    if (openPanelLine !== null) {
+      entries.push({ line: openPanelLine, label: description || "Enter description...", isPage: false });
     }
-    openPanelId = null;
+    openPanelLine = null;
     description = "";
   };
-  lines.forEach((line) => {
-    const type = lineType(line.text);
-    if (type === "page") {
-      flush();
-      entries.push({ id: line.id, label: badges.get(line.id) ?? "Page", isPage: true });
-    } else if (type === "panel") {
-      flush();
-      openPanelId = line.id;
-    } else if (openPanelId && !description && line.text.trim() && type !== "tag") {
-      description = line.text.trim();
+
+  lines.forEach((text, index) => {
+    const lineNumber = index + 1;
+    const kind = classifyLine(text);
+
+    if (kind === "page") {
+      flushPanel();
+      const match = text.trim().match(PAGE_RE);
+      const start = pageNumber + 1;
+      const isSpread = Boolean(match?.[2]);
+      pageNumber += isSpread ? 2 : 1;
+      entries.push({
+        line: lineNumber,
+        label: isSpread ? `Page ${start}-${start + 1}` : `Page ${start}`,
+        isPage: true,
+      });
+    } else if (kind === "panel") {
+      flushPanel();
+      openPanelLine = lineNumber;
+    } else if (openPanelLine !== null && !description && text.trim() && !["dialogue", "caption", "sfx"].includes(kind)) {
+      description = text.trim();
     }
   });
-  flush();
+
+  flushPanel();
   return entries;
 }
 
-function rememberedNames(lines: Line[]) {
-  return [
-    ...new Set(
-      lines
-        .map((line) => line.text.match(/^\s*CHARACTER\s*\(([^)]*)\)/i)?.[1]?.trim())
-        .filter((name): name is string => Boolean(name)),
-    ),
-  ];
+function rememberedNamesFromLines(lines: string[]): string[] {
+  const names = new Set<string>();
+  lines.forEach((text) => {
+    const match = text.match(DIALOGUE_RE);
+    if (match && !["CAPTION", "SFX"].includes(match[1].trim().toUpperCase())) names.add(match[1].trim());
+  });
+  return [...names];
 }
 
-// Real caret pixel position, straight from the Selection API — no mirror
-// element needed, since this is genuinely contentEditable now.
-function getCaretRect(): DOMRect | null {
-  const selection = window.getSelection();
-  if (!selection || selection.rangeCount === 0) return null;
-  const range = selection.getRangeAt(0).cloneRange();
-  range.collapse(true);
-  const rects = range.getClientRects();
-  if (rects.length) return rects[0];
-  const marker = document.createElement("span");
-  marker.textContent = "\u200b";
-  range.insertNode(marker);
-  const rect = marker.getBoundingClientRect();
-  marker.remove();
-  return rect;
+// ---------------------------------------------------------------------
+// Character-name autocomplete, triggered while typing a dialogue
+// subject (tab, then the name, before the colon).
+// ---------------------------------------------------------------------
+
+function rememberedNamesFromDoc(doc: Text): string[] {
+  const names = new Set<string>();
+  for (let i = 1; i <= doc.lines; i++) {
+    const match = doc.line(i).text.match(DIALOGUE_RE);
+    if (match && !["CAPTION", "SFX"].includes(match[1].trim().toUpperCase())) names.add(match[1].trim());
+  }
+  return [...names];
 }
 
-export function ScriptStudio({ document: script, onChange, onClose }: ScriptStudioProps) {
-  const [lines, setLines] = useState<Line[]>(() => linesFromSource(script.source));
-  const [activeLineId, setActiveLineId] = useState<string | null>(null);
-  const [suggestion, setSuggestion] = useState<Suggestion | null>(null);
-  const isInternalUpdate = useRef(false);
-  const elementsRef = useRef(new Map<string, HTMLDivElement>());
-  const focusRequest = useRef<{ id: string; offset: number } | null>(null);
-  const containerRef = useRef<HTMLDivElement>(null);
+function dialogueNameCompletions(context: CompletionContext): CompletionResult | null {
+  const line = context.state.doc.lineAt(context.pos);
+  const before = line.text.slice(0, context.pos - line.from);
+  const match = before.match(/^\t([A-Z][A-Z0-9' ]*)$/);
+  if (!match) return null;
 
-  // Resync from an externally-changed document (e.g. switching chapters),
-  // but ignore the echo of our own onChange call below.
-  useEffect(() => {
-    if (isInternalUpdate.current) {
-      isInternalUpdate.current = false;
-      return;
-    }
-    setLines(linesFromSource(script.source));
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [script.source]);
+  const query = match[1];
+  const options = rememberedNamesFromDoc(context.state.doc).filter(
+    (name) => name.toLowerCase().startsWith(query.toLowerCase()) && name.toLowerCase() !== query.toLowerCase()
+  );
+  if (!options.length) return null;
 
-  useEffect(() => {
-    const request = focusRequest.current;
-    if (!request) return;
-    focusRequest.current = null;
-    const el = elementsRef.current.get(request.id);
-    if (!el) return;
-    el.focus();
-    const selection = window.getSelection();
-    const range = document.createRange();
-    const textNode = el.firstChild;
-    if (textNode) {
-      const offset = Math.min(request.offset, textNode.textContent?.length ?? 0);
-      range.setStart(textNode, offset);
-    } else {
-      range.setStart(el, 0);
-    }
-    range.collapse(true);
-    selection?.removeAllRanges();
-    selection?.addRange(range);
-  }, [lines]);
-
-  const commit = (next: Line[]) => {
-    setLines(next);
-    isInternalUpdate.current = true;
-    onChange({ source: sourceFromLines(next), version: 1 });
+  return {
+    from: line.from + 1, // right after the tab
+    options: options.map((name) => ({ label: name, type: "text" })),
   };
+}
 
-  const registerRef = (id: string, el: HTMLDivElement | null) => {
-    if (el) elementsRef.current.set(id, el);
-    else elementsRef.current.delete(id);
-  };
+const characterAutocomplete = autocompletion({ override: [dialogueNameCompletions] });
 
-  const refocus = () => setLines((current) => [...current]);
+// ---------------------------------------------------------------------
+// Command-bar / Alt+1-5 actions, operating directly on the EditorView.
+// ---------------------------------------------------------------------
 
-  const handleTextChange = (id: string, text: string) => {
-    const next = lines.map((line) => (line.id === id ? { ...line, text } : line));
-    commit(next);
-    updateSuggestion(id, text);
-  };
-
-  const updateSuggestion = (id: string, text: string) => {
-    const selection = window.getSelection();
-    const offset = selection?.anchorOffset ?? text.length;
-    const before = text.slice(0, offset);
-    const match = before.match(OPEN_TAG_RE);
-    if (!match) {
-      setSuggestion(null);
-      return;
-    }
-    const query = match[2];
-    const options = rememberedNames(lines).filter(
-      (name) =>
-        name.toLowerCase().startsWith(query.toLowerCase()) &&
-        name.toLowerCase() !== query.toLowerCase(),
-    );
-    if (!options.length) {
-      setSuggestion(null);
-      return;
-    }
-    const rect = getCaretRect();
-    const containerRect = containerRef.current?.getBoundingClientRect();
-    const scrollTop = containerRef.current?.scrollTop ?? 0;
-    const scrollLeft = containerRef.current?.scrollLeft ?? 0;
-    setSuggestion({
-      lineId: id,
-      top: (rect?.bottom ?? 0) - (containerRect?.top ?? 0) + scrollTop,
-      left: (rect?.left ?? 0) - (containerRect?.left ?? 0) + scrollLeft,
-      rangeStart: offset - query.length,
-      rangeEnd: offset,
-      options,
-    });
-  };
-
-  const applySuggestion = (name: string) => {
-    if (!suggestion) return;
-    const line = lines.find((l) => l.id === suggestion.lineId);
-    if (!line) return;
-    const nextText =
-      line.text.slice(0, suggestion.rangeStart) + name + line.text.slice(suggestion.rangeEnd);
-    handleTextChange(suggestion.lineId, nextText);
-    focusRequest.current = { id: suggestion.lineId, offset: suggestion.rangeStart + name.length };
-    setSuggestion(null);
-  };
-
-  const insertAtCaret = (id: string, textToInsert: string, caretOffsetInInsert: number) => {
-    const line = lines.find((l) => l.id === id);
-    if (!line) return;
-    const selection = window.getSelection();
-    const pos = selection?.anchorOffset ?? line.text.length;
-    const before = line.text.slice(0, pos);
-    const after = line.text.slice(pos);
-    const index = lines.findIndex((l) => l.id === id);
-    const newLines = textToInsert.split("\n");
-    if (newLines.length === 1) {
-      const replacement: Line = { ...line, text: before + newLines[0] + after };
-      commit([...lines.slice(0, index), replacement, ...lines.slice(index + 1)]);
-      focusRequest.current = { id: line.id, offset: before.length + caretOffsetInInsert };
-      return;
-    }
-    const replacement: Line[] = [];
-    if (before) replacement.push({ ...line, text: before });
-    let focusId = line.id;
-    let runningOffset = 0;
-    newLines.forEach((text, i) => {
-      const lineId = i === 0 && !before ? line.id : newId();
-      replacement.push({ id: lineId, text });
-      if (runningOffset <= caretOffsetInInsert && caretOffsetInInsert <= runningOffset + text.length) {
-        focusId = lineId;
-      }
-      runningOffset += text.length + 1;
-    });
-    if (after) replacement.push({ id: newId(), text: after });
-    commit([...lines.slice(0, index), ...replacement, ...lines.slice(index + 1)]);
-    const focusLine = replacement.find((l) => l.id === focusId)!;
-    focusRequest.current = { id: focusId, offset: focusLine.text.length };
-  };
-
-  const insertTemplate = (key: string, lineId: string | null) => {
-    const id = lineId ?? lines[lines.length - 1]?.id;
-    if (!id) return;
-    if (key === "1") {
-      insertAtCaret(id, "Page\nPanel", 5); // caret lands right after "Panel"
-      return;
-    }
-    if (key === "2") {
-      insertAtCaret(id, "Panel", 5);
-      return;
-    }
-    const tag = templateText[key as "3" | "4" | "5"];
-    if (!tag) return;
-    const caret = tag.tag.length + 3; // right after "TAG ("
-    insertAtCaret(id, tag.template, caret);
-  };
-
-  const handleEnter = (id: string) => {
-    const index = lines.findIndex((line) => line.id === id);
-    if (index === -1) return;
-    const current = lines[index];
-    const selection = window.getSelection();
-    const offset = selection?.anchorOffset ?? current.text.length;
-    const before = current.text.slice(0, offset);
-    const after = current.text.slice(offset);
-    const newLine: Line = { id: newId(), text: after };
-    const next = [...lines];
-    next.splice(index, 1, { ...current, text: before }, newLine);
-    commit(next);
-    focusRequest.current = { id: newLine.id, offset: 0 };
-  };
-
-  const handleBackspaceMerge = (id: string) => {
-    const index = lines.findIndex((line) => line.id === id);
-    if (index <= 0) return;
-    const previous = lines[index - 1];
-    const current = lines[index];
-    const mergedText = previous.text + current.text;
-    const next = lines
-      .filter((line) => line.id !== id)
-      .map((line) => (line.id === previous.id ? { ...line, text: mergedText } : line));
-    commit(next);
-    focusRequest.current = { id: previous.id, offset: previous.text.length };
-  };
-
-  const handleTab = (id: string, event: ReactKeyboardEvent<HTMLDivElement>) => {
-    event.preventDefault();
-    const line = lines.find((l) => l.id === id);
-    if (!line) return;
-    const selection = window.getSelection();
-    const pos = selection?.anchorOffset ?? 0;
-    const match = line.text.match(TAG_LINE_RE);
+function nextPageNumber(doc: Text, throughLine: number): number {
+  let pageNumber = 0;
+  for (let lineNumber = 1; lineNumber <= throughLine; lineNumber++) {
+    const match = doc.line(lineNumber).text.trim().match(PAGE_RE);
     if (match) {
-      const openParen = match[0].indexOf("(");
-      const closeParen = match[0].indexOf(")", openParen);
-      if (pos <= closeParen + 1) {
-        focusRequest.current = { id, offset: match[0].length };
-        refocus();
+      const start = Number(match[1]);
+      const end = match[2] ? Number(match[2]) : start;
+      pageNumber += Math.max(1, end - start + 1);
+    }
+  }
+  return pageNumber + 1;
+}
+
+function nextPanelNumber(doc: Text, throughLine: number): number {
+  let panelNumber = 0;
+  for (let lineNumber = 1; lineNumber <= throughLine; lineNumber++) {
+    const text = doc.line(lineNumber).text.trim();
+    if (PAGE_RE.test(text)) panelNumber = 0;
+    else if (PANEL_RE.test(text)) panelNumber += 1;
+  }
+  return panelNumber + 1;
+}
+
+function insertNextPageOrPanel(view: EditorView, kind: "page" | "panel") {
+  const { state } = view;
+  const line = state.doc.lineAt(state.selection.main.head);
+  const label =
+    kind === "page"
+      ? `Page ${nextPageNumber(state.doc, line.number)}`
+      : `Panel ${nextPanelNumber(state.doc, line.number)}`;
+  const onBlankLine = line.text.trim() === "";
+  const insertText = onBlankLine ? label : `\n${label}`;
+  const from = line.to;
+
+  view.dispatch({
+    changes: { from, to: from, insert: insertText },
+    selection: { anchor: from + insertText.length },
+  });
+  view.focus();
+}
+
+function insertDialogueSkeleton(view: EditorView) {
+  const pos = view.state.selection.main.head;
+  const insertText = "\t (): ";
+  view.dispatch({
+    changes: { from: pos, insert: insertText },
+    selection: { anchor: pos + 1 }, // right after the tab, ready to type the name
+  });
+  view.focus();
+}
+
+function insertLetteringTag(view: EditorView, label: "CAPTION" | "SFX") {
+  const pos = view.state.selection.main.head;
+  const insertText = `\t${label} (): `;
+  view.dispatch({
+    changes: { from: pos, insert: insertText },
+    selection: { anchor: pos + insertText.length },
+  });
+  view.focus();
+}
+
+// Enter on an already-blank line inserts the next Panel (Shift-Enter:
+// the next Page) — same auto-numbering behavior as the base editor.
+function insertNextBlockOnEnter(view: EditorView, kind: "page" | "panel"): boolean {
+  const { state } = view;
+  const line = state.doc.lineAt(state.selection.main.head);
+  const prevLine = line.number > 1 ? state.doc.line(line.number - 1) : null;
+  const onBlankLine = line.text.trim() === "";
+  const prevBlank = prevLine ? prevLine.text.trim() === "" : false;
+  if (!onBlankLine || !prevBlank) return false;
+
+  const label =
+    kind === "page"
+      ? `Page ${nextPageNumber(state.doc, line.number)}`
+      : `Panel ${nextPanelNumber(state.doc, line.number)}`;
+  view.dispatch({
+    changes: { from: line.from, to: line.to, insert: label },
+    selection: { anchor: line.from + label.length },
+  });
+  return true;
+}
+
+const editorKeymap = keymap.of([
+  { key: "Enter", run: (view) => insertNextBlockOnEnter(view, "panel") },
+  { key: "Shift-Enter", run: (view) => insertNextBlockOnEnter(view, "page") },
+  {
+    key: "Alt-1",
+    run: (view) => {
+      insertNextPageOrPanel(view, "page");
+      return true;
+    },
+  },
+  {
+    key: "Alt-2",
+    run: (view) => {
+      insertNextPageOrPanel(view, "panel");
+      return true;
+    },
+  },
+  {
+    key: "Alt-3",
+    run: (view) => {
+      insertDialogueSkeleton(view);
+      return true;
+    },
+  },
+  {
+    key: "Alt-4",
+    run: (view) => {
+      insertLetteringTag(view, "CAPTION");
+      return true;
+    },
+  },
+  {
+    key: "Alt-5",
+    run: (view) => {
+      insertLetteringTag(view, "SFX");
+      return true;
+    },
+  },
+] satisfies KeyBinding[]);
+
+// ---------------------------------------------------------------------
+// Visual styling — same cm-* class names as the base editor, plus the
+// original script-* class names on the surrounding chrome so any
+// existing stylesheet targeting them keeps working unchanged.
+// ---------------------------------------------------------------------
+
+const scriptTheme = EditorView.baseTheme({
+  "&": { fontSize: "15px" },
+  ".cm-content": { fontFamily: "var(--font-mono, ui-monospace, monospace)" },
+  ".cm-page": { fontWeight: "700", textTransform: "uppercase", letterSpacing: "0.04em", opacity: "0.85" },
+  ".cm-panel": { fontWeight: "700" },
+  ".cm-pageTurner": { fontStyle: "italic", opacity: "0.6" },
+  ".cm-paragraph": { opacity: "0.85" },
+  ".cm-dialogue": { paddingLeft: "1.5em" },
+  ".cm-lettering-subject": { fontWeight: "700" },
+  ".cm-lettering-modifier": { fontStyle: "italic", opacity: "0.7" },
+  ".cm-lettering-content": {},
+});
+
+// ---------------------------------------------------------------------
+
+export function ScriptStudio({ document: script, title, onChange, onSave, onClose }: ScriptStudioProps) {
+  const editorRef = useRef<ReactCodeMirrorRef>(null);
+  const fileInputRef = useRef<HTMLInputElement>(null);
+  const [isInsightsOpen, setIsInsightsOpen] = useState(false);
+  const [fileStatus, setFileStatus] = useState("");
+
+  const lines = useMemo(() => script.source.replace(/\r/g, "").split("\n"), [script.source]);
+  const outline = useMemo(() => buildOutline(lines), [lines]);
+  const names = useMemo(() => rememberedNamesFromLines(lines), [lines]);
+  const stats = useMemo(() => getStats(lines), [lines]);
+
+  const extensions = useMemo(
+    () => [
+      scriptTheme,
+      scriptHighlightPlugin,
+      characterAutocomplete,
+      editorKeymap,
+      EditorView.lineWrapping,
+      placeholder("Press Alt+1 to add a page"),
+    ],
+    []
+  );
+
+  const handleChange = useCallback(
+    (value: string) => {
+      // Spreads the incoming document so any fields beyond source/version
+      // (or version logic owned elsewhere) survive untouched.
+      onChange({ ...script, source: value });
+    },
+    [onChange, script]
+  );
+
+  const runCommand = useCallback((fn: (view: EditorView) => void) => {
+    const view = editorRef.current?.view;
+    if (view) fn(view);
+  }, []);
+
+  const jumpToLine = useCallback((lineNumber: number) => {
+    const view = editorRef.current?.view;
+    if (!view) return;
+    const line = view.state.doc.line(lineNumber);
+    view.dispatch({ selection: { anchor: line.from }, scrollIntoView: true });
+    view.focus();
+  }, []);
+
+  const selectAll = useCallback(() => {
+    const view = editorRef.current?.view;
+    if (!view) return;
+    view.dispatch({ selection: { anchor: 0, head: view.state.doc.length } });
+    view.focus();
+  }, []);
+
+  const importFile = useCallback((file?: File) => {
+    if (!file) return;
+    const reader = new FileReader();
+    reader.addEventListener("load", () => {
+      if (typeof reader.result !== "string") {
+        setFileStatus("Could not open that script file");
         return;
       }
-    }
-    const nextText = `${line.text.slice(0, pos)}\t${line.text.slice(pos)}`;
-    handleTextChange(id, nextText);
-    focusRequest.current = { id, offset: pos + 1 };
+      let source = reader.result;
+      if (/\.cwscript$/i.test(file.name)) {
+        try {
+          const parsed: unknown = JSON.parse(source);
+          if (!parsed || typeof parsed !== "object" || !("source" in parsed) || typeof parsed.source !== "string") {
+            throw new Error("Invalid script document");
+          }
+          source = parsed.source;
+        } catch {
+          setFileStatus("Invalid .cwscript file");
+          return;
+        }
+      }
+      onChange({ ...script, source });
+      setFileStatus(`Opened ${file.name}`);
+    });
+    reader.addEventListener("error", () => setFileStatus("Could not open that script file"));
+    reader.readAsText(file);
+  }, [onChange, script]);
+
+  const exportFile = useCallback(() => {
+    const blob = new Blob([JSON.stringify({ source: script.source, version: 1 }, null, 2)], { type: "application/json;charset=utf-8" });
+    const url = URL.createObjectURL(blob);
+    const link = window.document.createElement("a");
+    link.href = url;
+    link.download = `${safeFilename(title)}.cwscript`;
+    link.click();
+    URL.revokeObjectURL(url);
+    setFileStatus("Script exported");
+  }, [script.source, title]);
+
+  const closeMenu = (event: React.MouseEvent<HTMLButtonElement>) => {
+    event.currentTarget.closest("details")?.removeAttribute("open");
   };
-
-  const handleNav = (id: string, event: ReactKeyboardEvent<HTMLDivElement>) => {
-    const selection = window.getSelection();
-    if (!selection || !selection.isCollapsed) return;
-    const index = lines.findIndex((l) => l.id === id);
-    if (index === -1) return;
-    const offset = selection.anchorOffset;
-    const textLength = lines[index].text.length;
-
-    if (event.key === "ArrowUp" && index > 0) {
-      event.preventDefault();
-      const target = lines[index - 1];
-      focusRequest.current = { id: target.id, offset: Math.min(offset, target.text.length) };
-      refocus();
-      return;
-    }
-    if (event.key === "ArrowDown" && index < lines.length - 1) {
-      event.preventDefault();
-      const target = lines[index + 1];
-      focusRequest.current = { id: target.id, offset: Math.min(offset, target.text.length) };
-      refocus();
-      return;
-    }
-    if (event.key === "ArrowLeft" && offset === 0 && index > 0) {
-      event.preventDefault();
-      const target = lines[index - 1];
-      focusRequest.current = { id: target.id, offset: target.text.length };
-      refocus();
-      return;
-    }
-    if (event.key === "ArrowRight" && offset === textLength && index < lines.length - 1) {
-      event.preventDefault();
-      const target = lines[index + 1];
-      focusRequest.current = { id: target.id, offset: 0 };
-      refocus();
-      return;
-    }
-  };
-
-  const handleLineKeyDown = (id: string, event: ReactKeyboardEvent<HTMLDivElement>) => {
-    if (suggestion?.lineId === id) {
-      if (event.key === "Escape") {
-        setSuggestion(null);
-        return;
-      }
-      if ((event.key === "Enter" || event.key === "Tab") && suggestion.options.length) {
-        event.preventDefault();
-        applySuggestion(suggestion.options[0]);
-        return;
-      }
-    }
-    if (event.altKey && !event.ctrlKey && !event.metaKey && "12345".includes(event.key)) {
-      event.preventDefault();
-      insertTemplate(event.key, id);
-      return;
-    }
-    if (event.key === "Enter") {
-      event.preventDefault();
-      handleEnter(id);
-      return;
-    }
-    if (event.key === "Backspace") {
-      const selection = window.getSelection();
-      if (selection?.isCollapsed && selection.anchorOffset === 0) {
-        event.preventDefault();
-        handleBackspaceMerge(id);
-        return;
-      }
-    }
-    if (event.key === "Tab") {
-      handleTab(id, event);
-      return;
-    }
-    handleNav(id, event);
-  };
-
-  const badges = computeBadges(lines);
-  const outline = buildOutline(lines, badges);
-  const names = rememberedNames(lines);
 
   return (
     <section className="script-studio">
+      <header className="script-menubar">
+        <strong>Story Writer</strong>
+        <span className="script-document-title">{title}</span>
+        <details className="script-menu-group">
+          <summary>File</summary>
+          <div className="script-menu-popover">
+            <button type="button" onClick={(event) => { fileInputRef.current?.click(); closeMenu(event); }}>Open script...</button>
+            <button type="button" onClick={(event) => { exportFile(); closeMenu(event); }}>Export .cwscript</button>
+            <button type="button" onClick={(event) => { onSave(); closeMenu(event); }}>Save project</button>
+            <button type="button" onClick={(event) => { window.print(); closeMenu(event); }}>Print</button>
+          </div>
+        </details>
+        <details className="script-menu-group">
+          <summary>Edit</summary>
+          <div className="script-menu-popover">
+            <button type="button" onClick={(event) => { selectAll(); closeMenu(event); }}>Select all</button>
+          </div>
+        </details>
+        <details className="script-menu-group">
+          <summary>View</summary>
+          <div className="script-menu-popover">
+            <button type="button" onClick={(event) => { setIsInsightsOpen((open) => !open); closeMenu(event); }}>Toggle insights</button>
+          </div>
+        </details>
+        <span className="script-file-status" role="status">{fileStatus}</span>
+      </header>
+      <input
+        ref={fileInputRef}
+        className="script-file-input"
+        type="file"
+        accept=".cwscript,.txt,text/plain,application/json"
+        onChange={(event) => {
+          importFile(event.currentTarget.files?.[0]);
+          event.currentTarget.value = "";
+        }}
+      />
       <div className="script-commandbar">
-        <button type="button" onClick={onClose}>
-          Back to chapter
-        </button>
-        <button type="button" title="Alt+1" onClick={() => insertTemplate("1", activeLineId)}>
-          Page
-        </button>
-        <button type="button" title="Alt+2" onClick={() => insertTemplate("2", activeLineId)}>
-          Panel
-        </button>
-        <button type="button" title="Alt+3" onClick={() => insertTemplate("3", activeLineId)}>
-          Balloon
-        </button>
-        <button type="button" title="Alt+4" onClick={() => insertTemplate("4", activeLineId)}>
-          Caption
-        </button>
-        <button type="button" title="Alt+5" onClick={() => insertTemplate("5", activeLineId)}>
-          SFX
-        </button>
-        <span>
-          {names.length ? `${names.length} character tag${names.length === 1 ? "" : "s"}` : ""}
-        </span>
+        <button type="button" onClick={onClose}>Back to chapter</button>
+        <span className="script-toolbar-label">Insert</span>
+        <button type="button" title="Alt+1" onClick={() => runCommand((view) => insertNextPageOrPanel(view, "page"))}>Page</button>
+        <button type="button" title="Alt+2" onClick={() => runCommand((view) => insertNextPageOrPanel(view, "panel"))}>Panel</button>
+        <button type="button" title="Alt+3" onClick={() => runCommand(insertDialogueSkeleton)}>Dialogue</button>
+        <button type="button" title="Alt+4" onClick={() => runCommand((view) => insertLetteringTag(view, "CAPTION"))}>Caption</button>
+        <button type="button" title="Alt+5" onClick={() => runCommand((view) => insertLetteringTag(view, "SFX"))}>SFX</button>
+        <span className="script-stats-inline">{stats.pages} {stats.pages === 1 ? "page" : "pages"} · {stats.panels} {stats.panels === 1 ? "panel" : "panels"} · {stats.spokenWords} spoken words</span>
+        <button type="button" className="script-insights-toggle" aria-pressed={isInsightsOpen} onClick={() => setIsInsightsOpen((open) => !open)}>Insights</button>
       </div>
       <div className="script-workspace">
         <nav className="script-outline" aria-label="Script outline">
-          {outline.map((entry) =>
-            entry.isPage ? (
-              <a key={entry.id} className="script-outline-page" href={`#${entry.id}`}>
-                {entry.label}
-              </a>
-            ) : (
-              <a key={entry.id} className="script-outline-panel" href={`#${entry.id}`}>
-                {entry.label}
-              </a>
-            ),
-          )}
+          <span>Outline</span>
+          {outline.map((entry) => (
+            <button
+              key={entry.line}
+              type="button"
+              className={entry.isPage ? "script-outline-page" : "script-outline-panel"}
+              onClick={() => jumpToLine(entry.line)}
+            >
+              {entry.label}
+            </button>
+          ))}
         </nav>
-        <main className="script-document" ref={containerRef}>
-          <div className="script-editor-shell">
-            {lines.map((line, index) => {
-              const type = lineType(line.text);
-              const badge = badges.get(line.id);
-              const isOnlyEmptyLine = lines.length === 1 && line.text === "";
-              return (
-                <div key={line.id} id={line.id} className={`script-line script-line-${type}`}>
-                  {badge && (
-                    <span className="script-line-badge" contentEditable={false}>
-                      {badge}
-                    </span>
-                  )}
-                  <div
-                    ref={(el) => registerRef(line.id, el)}
-                    className="script-line-input"
-                    contentEditable
-                    suppressContentEditableWarning
-                    role="textbox"
-                    aria-label={`Script line ${index + 1}`}
-                    data-placeholder={isOnlyEmptyLine ? "Press Alt+1 to add a page" : undefined}
-                    onFocus={() => setActiveLineId(line.id)}
-                    onInput={(event) =>
-                      handleTextChange(line.id, (event.target as HTMLDivElement).textContent ?? "")
-                    }
-                    onKeyDown={(event) => handleLineKeyDown(line.id, event)}
-                  />
-                </div>
-              );
-            })}
-            {suggestion && (
-              <ul className="script-suggestions" style={{ top: suggestion.top, left: suggestion.left }}>
-                {suggestion.options.map((name) => (
-                  <li key={name}>
-                    <button
-                      type="button"
-                      onMouseDown={(event) => {
-                        event.preventDefault();
-                        applySuggestion(name);
-                      }}
-                    >
-                      {name}
-                    </button>
-                  </li>
-                ))}
-              </ul>
-            )}
-          </div>
+        <main className="script-document" aria-label={`${title} script editor`}>
+          <CodeMirror
+            ref={editorRef}
+            value={script.source}
+            height="100%"
+            basicSetup={{ lineNumbers: false, foldGutter: false }}
+            extensions={extensions}
+            onChange={handleChange}
+            className="script-editor-shell"
+          />
         </main>
+        {isInsightsOpen && <aside className="script-insights" aria-label="Script insights">
+          <h2>Script insights</h2>
+          <div className="script-metric"><span>Pages</span><strong>{stats.pages}</strong></div>
+          <div className="script-metric"><span>Panels</span><strong>{stats.panels}</strong></div>
+          <div className="script-metric"><span>Spoken words</span><strong>{stats.spokenWords}</strong></div>
+          <div className="script-metric"><span>Total words</span><strong>{stats.words}</strong></div>
+          <div className="script-metric"><span>Characters</span><strong>{names.length}</strong></div>
+        </aside>}
       </div>
     </section>
   );
+}
+
+function getStats(lines: string[]) {
+  let pages = 0;
+  let panels = 0;
+  let spokenText = "";
+
+  for (const line of lines) {
+    const page = line.trim().match(PAGE_RE);
+    if (page) {
+      pages += page[2] ? Math.max(1, Number(page[2]) - Number(page[1]) + 1) : 1;
+      continue;
+    }
+    if (PANEL_RE.test(line.trim())) panels += 1;
+    const lettering = line.match(DIALOGUE_RE);
+    if (lettering && lettering[1].trim().toUpperCase() !== "SFX") spokenText += ` ${lettering[3]}`;
+  }
+
+  const countWords = (text: string) => text.match(/[\p{L}\p{N}'’-]+/gu)?.length ?? 0;
+  return { pages, panels, spokenWords: countWords(spokenText), words: countWords(lines.join(" ")) };
+}
+
+function safeFilename(title: string) {
+  return title.trim().replace(/[<>:"/\\|?*\u0000-\u001f]/g, "-").replace(/\s+/g, "-") || "comic-script";
 }

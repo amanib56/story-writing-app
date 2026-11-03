@@ -15,38 +15,44 @@
   --font-mono: var(--font-geist-mono);
   --font-serif: Georgia, "Times New Roman", serif;
 
-  /* surfaces — three steps of depth instead of shadows */
-  --color-canvas: #16181a;       /* app background */
-  --color-paper: #1e2124;        /* raised surfaces: editor panel, cards, modals */
-  --color-paper-inset: #131516;  /* recessed fields: textareas, inputs, script editor */
+  /* warm sunset surfaces */
+  --color-canvas: #f0e5d7;
+  --color-paper: #fffaf3;
+  --color-paper-inset: #fffdf9;
 
   /* text */
-  --color-ink: #e6e1d3;          /* primary text — warm parchment, not pure white */
-  --color-muted: #8d897d;        /* secondary text, labels, eyebrows */
-  --color-faint: #6b675d;        /* placeholder text, disabled state */
+  --color-ink: #342d28;
+  --color-muted: #76685e;
+  --color-faint: #a9998d;
 
   /* structure */
-  --color-line: #313530;         /* borders, dividers */
-  --color-line-soft: #262925;    /* quieter borders (list rows, nested items) */
+  --color-line: #dfd1c2;
+  --color-line-soft: #eee3d7;
 
-  /* accents — tied to the story's own material, not generic UI color */
-  --color-accent: #4fb0c2;       /* mana glow — primary actions, links, focus */
-  --color-accent-strong: #6fc4d4;/* hover/pressed */
-  --color-accent-soft: #1c3236;  /* accent-tinted background (active nav, badges) */
+  /* clear blue interaction accents against warm paper */
+  --color-accent: #286c9c;
+  --color-accent-strong: #1f5a85;
+  --color-accent-soft: #e0edf5;
 
-  --color-rune: #c9a15a;         /* gold ink — rank badges, script line numbers */
-  --color-rune-soft: #322a1c;    /* rune-tinted background */
+  --color-rune: #b77843;
+  --color-rune-soft: #f3e5d4;
 
-  --color-danger: #c9695a;       /* delete actions */
-  --color-danger-soft: #2f1e1b;
-  --color-success: #7a9b6e;      /* save-status dot */
+  --color-danger: #a8483e;
+  --color-danger-soft: #f8e6e2;
+  --color-success: #65804f;
 }
 
 body {
   background: var(--color-canvas);
-  color: var(--color-ink);
+  color: theme(--color-ink); /* Correctly maps Tailwind's theme token */
   font-family: var(--font-sans), sans-serif;
 }
+
+/* Forces standard text tags, paragraphs, and lists to inherit the bright ink tone */
+p, li, span, label, input, textarea {
+  color: inherit;
+}
+
 
 button,
 input,
